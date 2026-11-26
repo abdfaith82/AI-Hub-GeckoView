@@ -265,9 +265,17 @@ fun parseConductorPlan(text: String, mainTask: String): List<SubTask> {
 // الشركة صاحبة المفتاح نفسها.
 fun prefs(context: Context) = context.getSharedPreferences("aihub_keys", Context.MODE_PRIVATE)
 fun getKey(context: Context, name: String): String = prefs(context).getString(name, "").orEmpty()
+// v1.3 — ترحيل أسماء نماذج تقاعدت عند أصحابها: الاسم المحفوظ
+// القديم يُستبدل تلقائياً بالبديل الحالي، فلا يعود 404.
+fun migratedModel(saved: String): String = when (saved.trim()) {
+    "grok-4" -> "grok-4.3"
+    "gemini-2.5-flash" -> "gemini-3.5-flash-lite"
+    "gemini-2.5-pro" -> "gemini-3.8-flash"
+    else -> saved
+}
 fun getModel(context: Context, provider: String, default: String): String {
     val v = prefs(context).getString("model_$provider", "").orEmpty()
-    return v.ifBlank { default }
+    return migratedModel(v).ifBlank { default }
 }
 fun providerFor(modelIndex: Int): String? = when (modelIndex) {
     0 -> "openai"
@@ -280,8 +288,8 @@ fun providerFor(modelIndex: Int): String? = when (modelIndex) {
 fun defaultModel(provider: String): String = when (provider) {
     "openai" -> "gpt-4o-mini"
     "custom" -> "gpt-4o-mini"
-    "xai" -> "grok-4"
-    "gemini" -> "gemini-2.5-flash"
+    "xai" -> "grok-4.3"
+    "gemini" -> "gemini-3.5-flash-lite"
     "anthropic" -> "claude-sonnet-4-5-20250929"
     else -> ""
 }
@@ -963,7 +971,8 @@ fun AiHubApp() {
                                 Text(task.role, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                                 Text("النموذج: ${model.name} — ${task.status}", fontSize = 13.sp, color = Color(0xFF666666))
                                 if (task.startedAt > 0L && task.doneAt > task.startedAt) {
-                                    Text("⏱ استغرق ${(task.doneAt - task.startedAt) / 1000} ث", fontSize = 12.sp, color = Color(0xFF666666))
+                                    val secs = (task.doneAt - task.startedAt) / 1000
+                                    Text(if (secs == 0L) "⏱ استغرق أقل من ثانية" else "⏱ استغرق $secs ث", fontSize = 12.sp, color = Color(0xFF666666))
                                 }
                             }
                         }
@@ -1028,7 +1037,7 @@ fun AiHubApp() {
                                         sending.remove(index)
                                         val current = subTasks[index]
                                         if (answer.startsWith("خطأ")) {
-                                            subTasks[index] = current.copy(status = "فشل الإرسال التلقائي — جرّب اليدوي", doneAt = System.currentTimeMillis())
+                                            subTasks[index] = current.copy(status = "فشل الإرسال — ${answer.take(110)}", doneAt = System.currentTimeMillis())
                                             logEvent("فشل إرسال «${task.role}» — ${answer.take(80)}")
                                             Toast.makeText(context, answer.take(200), Toast.LENGTH_LONG).show()
                                         } else {
@@ -1098,7 +1107,7 @@ fun AiHubApp() {
                                     sending.remove(index)
                                     val current = subTasks[index]
                                     if (answer.startsWith("خطأ")) {
-                                        subTasks[index] = current.copy(status = "فشل الإرسال التلقائي — جرّب اليدوي", doneAt = System.currentTimeMillis())
+                                        subTasks[index] = current.copy(status = "فشل الإرسال — ${answer.take(110)}", doneAt = System.currentTimeMillis())
                                         logEvent("فشل إرسال «${current.role}»")
                                     } else {
                                         subTasks[index] = current.copy(result = answer, status = "اكتمل ✓ (تلقائي عبر API)", doneAt = System.currentTimeMillis())
@@ -1286,6 +1295,11 @@ fun AiHubApp() {
                 )
                 Text(
                     "Meta AI وAntigravity بلا API محادثة رسمي، لذلك لا حقل لهما هنا ويبقى إرسالهما يدوياً.",
+                    fontSize = 13.sp,
+                    color = Color(0xFF555555)
+                )
+                Text(
+                    "🔑 تأكد أن كل مفتاح في حقله الصحيح: مفتاح xAI يبدأ بـ xai-، وOpenAI بـ sk-، وAnthropic بـ sk-ant-، وGemini بـ AIza من AI Studio. مفتاح خاطئ أو من شركة أخرى يعطي «Incorrect API key provided». والأسماء الحالية: Grok: grok-4.3، وGemini: gemini-3.5-flash-lite — والأسماء القديمة المحفوظة (grok-4 وgemini-2.5-flash) تُرحَّل تلقائياً.",
                     fontSize = 13.sp,
                     color = Color(0xFF555555)
                 )
