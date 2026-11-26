@@ -438,7 +438,7 @@ fun AiHubApp() {
         }
         geckoRuntime.webExtensionController.installBuiltIn("resource://android/assets/webext/").accept(
             { extension ->
-                extension.setMessageDelegate("com.abd.aihubgecko", delegate)
+                extension?.setMessageDelegate(delegate, "com.abd.aihubgecko")
                 extensionReady = true
             },
             { extensionReady = false }
