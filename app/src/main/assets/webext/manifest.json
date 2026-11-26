@@ -1,0 +1,26 @@
+{
+  "manifest_version": 2,
+  "name": "AI Hub Page Reader",
+  "version": "1.0",
+  "description": "Reads the visible page text and reports it to the AI Hub Gecko app, so the conductor model can see the other pages (read-only).",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "aihub-reader@abd.local",
+      "strict_min_version": "57.0"
+    }
+  },
+  "permissions": [
+    "<all_urls>",
+    "nativeMessaging"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
