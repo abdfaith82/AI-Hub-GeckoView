@@ -1146,7 +1146,7 @@ fun AiHubApp() {
                     val anyResultMerge = subTasks.any { it.result.isNotBlank() }
                     if (conductorMerging) {
                         Button(onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth()) {
-                            Text("⏳ القائد (${services[cIdxMerge].name}) يدمج النتائج…", fontSize = 14.sp)
+                            Text("⏳ القائد (${if (cIdxMerge == 10) "🔧 مخصص" else services[cIdxMerge].name}) يدمج النتائج…", fontSize = 14.sp)
                         }
                     } else {
                         Button(
