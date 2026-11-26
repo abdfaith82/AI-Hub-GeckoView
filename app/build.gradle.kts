@@ -62,8 +62,10 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-core")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    // GeckoView — محرك موزيلا (الإصدار 161.0، تحقق منه 2026-11-26
-    // عبر maven.mozilla.org). هو ما يتيح الإضافة المدمجة التي تقرأ
-    // نص الصفحات — وهو أيضاً سبب كبر حجم الـ APK (~150 ميغا).
-    implementation("org.mozilla.geckoview:geckoview:161.0.20261118180411")
+    // GeckoView — محرك موزيلا. الإصدار 141.0 (آب 2025) هو أحدث
+    // إصدار يقبل compileSdk 35: الإصدار 161.0 يشترط compileSdk 37
+    // (minCompileSdk=37 في بيانات الـ AAR) فيفشل البناء مع AGP 8.6.
+    // وهو ما يتيح الإضافة المدمجة التي تقرأ نص الصفحات — وهو أيضاً
+    // سبب كبر حجم الـ APK (~150 ميغا).
+    implementation("org.mozilla.geckoview:geckoview:141.0.20250806102122")
 }
