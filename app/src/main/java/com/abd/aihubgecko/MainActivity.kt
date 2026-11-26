@@ -7,6 +7,9 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
@@ -155,7 +158,9 @@ data class SubTask(
     val instruction: String,
     val prompt: String,
     val result: String = "",
-    val status: String = "لم يُرسل"
+    val status: String = "لم يُرسل",
+    val startedAt: Long = 0,
+    val doneAt: Long = 0
 )
 
 // كل نوع مهمة يُقسَّم إلى 6 أدوار مهنية، وكل دور يُسند إلى النموذج
@@ -269,10 +274,12 @@ fun providerFor(modelIndex: Int): String? = when (modelIndex) {
     1 -> "xai"
     2 -> "gemini"
     3 -> "anthropic"
+    10 -> "custom" // v1.2 — القائد المخصص: نقطة نهاية متوافقة مع OpenAI
     else -> null // Meta AI وAntigravity: بلا API محادثة رسمي — يدوي فقط
 }
 fun defaultModel(provider: String): String = when (provider) {
     "openai" -> "gpt-4o-mini"
+    "custom" -> "gpt-4o-mini"
     "xai" -> "grok-4"
     "gemini" -> "gemini-2.5-flash"
     "anthropic" -> "claude-sonnet-4-5-20250929"
@@ -329,6 +336,45 @@ suspend fun callApi(provider: String, apiKey: String, model: String, prompt: Str
         }
     } catch (e: Exception) {
         "خطأ في الاتصال: ${e.message}"
+    }
+}
+
+// ===== v1.2 — نقطة نهاية مخصصة متوافقة مع OpenAI =====
+// خادم يفهم صيغة OpenAI لطلبات المحادثة (POST /v1/chat/completions)
+// — مثل Groq المجاني، أو OpenRouter، أو خادم FreeLLMAPI إن شغّلته
+// على جهاز آخر. الرابط والمفتاح واسم النموذج تُحفظ في التطبيق فقط.
+suspend fun callApiCustom(baseUrl: String, apiKey: String, model: String, prompt: String): String = withContext(Dispatchers.IO) {
+    try {
+        val clean = baseUrl.trim().trimEnd('/')
+        if (clean.isBlank()) return@withContext "خطأ: أدخل رابط الخادم المخصص أولاً"
+        val urlStr = "$clean/v1/chat/completions"
+        val body = JSONObject().put("model", model.ifBlank { "gpt-4o-mini" }).put("max_tokens", 2000)
+            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt))).toString()
+        val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("Authorization", "Bearer $apiKey")
+            doOutput = true
+            connectTimeout = 60000
+            readTimeout = 120000
+        }
+        conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+        val code = conn.responseCode
+        val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.readText().orEmpty()
+        if (code !in 200..299) return@withContext "خطأ API ($code): ${text.take(300)}"
+        JSONObject(text).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
+    } catch (e: Exception) {
+        "خطأ في الاتصال: ${e.message}"
+    }
+}
+
+// القائد قد يكون أحد النماذج الأربعة أو المخصص (10). هذه الدالة
+// ترسل للقائد أياً كان نوعه، وتُستخدم في التخطيط والدمج وقراءة الصفحات.
+suspend fun callConductorApi(context: Context, provider: String, prompt: String): String {
+    return if (provider == "custom") {
+        callApiCustom(getKey(context, "url_custom"), getKey(context, "key_custom"), getModel(context, "custom", defaultModel("custom")), prompt)
+    } else {
+        callApi(provider, getKey(context, "key_$provider"), getModel(context, provider, defaultModel(provider)), prompt)
     }
 }
 
@@ -495,6 +541,14 @@ fun AiHubApp() {
         delay(5000)
         if (!extensionReady) installExtension()
     }
+
+    // v1.2 — غرفة التحكم: تحديث الزمن المنقضي كل ثانية أثناء الإرسال.
+    LaunchedEffect(sendingAll) {
+        while (sendingAll) {
+            missionNowMs = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
     val scope = rememberCoroutineScope()
     val sending = remember { mutableStateListOf<Int>() }
     var sendingAll by remember { mutableStateOf(false) }
@@ -508,6 +562,11 @@ fun AiHubApp() {
     var modelXai by remember { mutableStateOf(getModel(context, "xai", defaultModel("xai"))) }
     var modelGemini by remember { mutableStateOf(getModel(context, "gemini", defaultModel("gemini"))) }
     var modelAnthropic by remember { mutableStateOf(getModel(context, "anthropic", defaultModel("anthropic"))) }
+
+    // v1.2 — نقطة نهاية مخصصة متوافقة مع OpenAI (Groq / OpenRouter / FreeLLMAPI)
+    var keyCustom by remember { mutableStateOf(getKey(context, "key_custom")) }
+    var modelCustom by remember { mutableStateOf(getModel(context, "custom", defaultModel("custom"))) }
+    var urlCustom by remember { mutableStateOf(getKey(context, "url_custom")) }
 
     // حالة مقسّم المهام
     var mainTask by remember { mutableStateOf("") }
@@ -523,10 +582,22 @@ fun AiHubApp() {
     var conductorMerging by remember { mutableStateOf(false) }
     var readingPages by remember { mutableStateOf(false) }
 
+    // v1.2 — غرفة التحكم: سجل أحداث حي + زمن المهمة
+    val missionLog = remember { mutableStateListOf<String>() }
+    var missionStartMs by remember { mutableStateOf(0L) }
+    var missionNowMs by remember { mutableStateOf(0L) }
+
     fun copyText(text: String, message: String) {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("aihub", text))
         Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+    }
+
+    // v1.2 — غرفة التحكم: تسجيل حدث بساعة وقوعه في سجل المهمة.
+    fun logEvent(text: String) {
+        val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+        missionLog.add(0, "$time — $text")
+        if (missionLog.size > 40) missionLog.removeAt(missionLog.size - 1)
     }
 
     fun copyPrompt() {
@@ -674,6 +745,15 @@ fun AiHubApp() {
                                 ) { Text(name + if (hasKey) "" else " 🔒", fontSize = 13.sp) }
                             }
                         }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            val hasCustomKey = getKey(context, "key_custom").isNotBlank() && getKey(context, "url_custom").isNotBlank()
+                            OutlinedButton(
+                                onClick = { conductorIndex = 10 },
+                                colors = if (conductorIndex == 10) ButtonDefaults.outlinedButtonColors(containerColor = Color(0xFF6A1B9A), contentColor = Color.White) else ButtonDefaults.outlinedButtonColors()
+                            ) { Text("🔧 مخصص" + if (hasCustomKey) "" else " 🔒", fontSize = 13.sp) }
+                            Text("قائد من نقطة نهاية متوافقة مع OpenAI (مثل Groq المجاني) — تُضبط من شاشة المفاتيح.", fontSize = 12.sp, color = Color(0xFF666666), modifier = Modifier.weight(1f))
+                        }
                         Spacer(modifier = Modifier.height(8.dp))
                         Button(
                             onClick = {
@@ -684,26 +764,28 @@ fun AiHubApp() {
                                     if (cIdx == null) {
                                         subTasks.clear()
                                         subTasks.addAll(splitTask(mainTask, taskType))
+                                        logEvent("تم التقسيم المحلي إلى 6 مهام فرعية")
                                         mergedReport = ""
                                         screen = "split"
                                     } else {
                                         val cProvider = providerFor(cIdx)
                                         val cKey = if (cProvider != null) getKey(context, "key_$cProvider") else ""
                                         if (cProvider == null || cKey.isBlank()) {
-                                            Toast.makeText(context, "أضف مفتاح ${services[cIdx].name} أولاً من شاشة المفاتيح", Toast.LENGTH_LONG).show()
+                                            Toast.makeText(context, "أضف مفتاح ${if (cIdx == 10) "المخصص" else services[cIdx].name} أولاً من شاشة المفاتيح", Toast.LENGTH_LONG).show()
                                         } else {
                                             conductorPlanning = true
                                             scope.launch {
-                                                val modelName = getModel(context, cProvider, defaultModel(cProvider))
-                                                val plan = callApi(cProvider, cKey, modelName, conductorPlanPrompt(mainTask, taskType))
+                                                val plan = callConductorApi(context, cProvider, conductorPlanPrompt(mainTask, taskType))
                                                 conductorPlanning = false
                                                 val parsed = parseConductorPlan(plan, mainTask)
                                                 subTasks.clear()
                                                 if (parsed.size < 2) {
                                                     subTasks.addAll(splitTask(mainTask, taskType))
+                                                    logEvent("تعذّر فهم خطة القائد — استُخدم التقسيم المحلي")
                                                     Toast.makeText(context, "تعذّر فهم خطة القائد — استُخدم التقسيم المحلي", Toast.LENGTH_LONG).show()
                                                 } else {
                                                     subTasks.addAll(parsed)
+                                                    logEvent("القائد قسّم المهمة إلى ${parsed.size} مهام فرعية")
                                                 }
                                                 mergedReport = ""
                                                 screen = "split"
@@ -820,13 +902,46 @@ fun AiHubApp() {
                 Text("النوع: $taskType — اكتمل ${subTasks.count { it.result.isNotBlank() }} من 6", fontSize = 13.sp, color = Color(0xFF666666))
                 val cIdxHeader = conductorIndex
                 if (cIdxHeader != null) {
-                    Text("👑 القائد: ${services[cIdxHeader].name} — يخطط التقسيم ويدمج النتائج", fontSize = 13.sp, color = Color(0xFF6A1B9A), fontWeight = FontWeight.Bold)
+                    Text("👑 القائد: ${if (cIdxHeader == 10) "🔧 مخصص" else services[cIdxHeader].name} — يخطط التقسيم ويدمج النتائج", fontSize = 13.sp, color = Color(0xFF6A1B9A), fontWeight = FontWeight.Bold)
                 }
                 Text(
                     "الخطوات: 1) اضغط «إرسال إلى النموذج» فيُنسخ سؤاله المجهّز ويُفتح تبويبه 2) الصق السؤال في صندوق المحادثة 3) انسخ إجابة النموذج 4) ارجع هنا واضغط «لصق النتيجة» في بطاقته 5) بعد اكتمال الكل اضغط «دمج النتائج». أو اضغط «إرسال تلقائي للكل» في الأسفل فيرسل التطبيق المهام دفعة واحدة عبر API الرسمي (لمن أضفت مفتاحه) ويدمج النتائج تلقائياً.",
                     fontSize = 13.sp,
                     color = Color(0xFF555555)
                 )
+            }
+            // v1.2 — غرفة التحكم (Mission Control): تقدم حي لكل الوكلاء
+            // الستة + سجل أحداث بالساعات — كما في لوحة تحكم الفيديو.
+            item {
+                val doneCount = subTasks.count { it.result.isNotBlank() }
+                val workingCount = subTasks.count { it.startedAt > 0L && it.doneAt == 0L }
+                val failedCount = subTasks.count { it.status.startsWith("فشل") }
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1B2A4A))
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("🎛️ غرفة التحكم — Mission Control", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text("✅ اكتمل $doneCount/6  •  ⚡ يعمل الآن $workingCount  •  ❌ فشل $failedCount  •  ⏳ بانتظار ${6 - doneCount - workingCount - failedCount}", fontSize = 13.sp, color = Color(0xFFBBDEFB))
+                        if (missionStartMs > 0L) {
+                            val elapsedSec = ((if (sendingAll) missionNowMs else System.currentTimeMillis()) - missionStartMs) / 1000
+                            Text("⏱ الزمن المنقضي: ${elapsedSec / 60} د ${elapsedSec % 60} ث", fontSize = 13.sp, color = Color(0xFFBBDEFB))
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(modifier = Modifier.fillMaxWidth().height(8.dp).background(Color(0xFF37474F), RoundedCornerShape(4.dp))) {
+                            Box(modifier = Modifier.fillMaxWidth(doneCount / 6f).height(8.dp).background(Color(0xFF66BB6A), RoundedCornerShape(4.dp)))
+                        }
+                        if (missionLog.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("📜 سجل الأحداث:", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                            missionLog.take(6).forEach { line ->
+                                Text(line, fontSize = 12.sp, color = Color(0xFFE3F2FD))
+                            }
+                        }
+                    }
+                }
             }
             itemsIndexed(subTasks) { index, task ->
                 val model = services[task.modelIndex]
@@ -847,6 +962,9 @@ fun AiHubApp() {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(task.role, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                                 Text("النموذج: ${model.name} — ${task.status}", fontSize = 13.sp, color = Color(0xFF666666))
+                                if (task.startedAt > 0L && task.doneAt > task.startedAt) {
+                                    Text("⏱ استغرق ${(task.doneAt - task.startedAt) / 1000} ث", fontSize = 12.sp, color = Color(0xFF666666))
+                                }
                             }
                         }
                         Spacer(modifier = Modifier.height(8.dp))
@@ -877,7 +995,8 @@ fun AiHubApp() {
                                     if (text.isBlank()) {
                                         Toast.makeText(context, "الحافظة فارغة — انسخ إجابة النموذج أولاً", Toast.LENGTH_SHORT).show()
                                     } else {
-                                        subTasks[index] = task.copy(result = text, status = "اكتمل ✓")
+                                        subTasks[index] = task.copy(result = text, status = "اكتمل ✓", doneAt = System.currentTimeMillis())
+                                        logEvent("لُصقت نتيجة «${task.role}» يدوياً")
                                         Toast.makeText(context, "تم لصق نتيجة «${task.role}»", Toast.LENGTH_SHORT).show()
                                     }
                                 },
@@ -900,7 +1019,8 @@ fun AiHubApp() {
                             Button(
                                 onClick = {
                                     sending.add(index)
-                                    subTasks[index] = task.copy(status = "يُرسل تلقائياً عبر API…")
+                                    subTasks[index] = task.copy(status = "يُرسل تلقائياً عبر API…", startedAt = System.currentTimeMillis(), doneAt = 0L)
+                                    logEvent("أُرسلت «${task.role}» إلى ${model.name}")
                                     scope.launch {
                                         val key = getKey(context, "key_$provider")
                                         val modelName = getModel(context, provider, defaultModel(provider))
@@ -908,10 +1028,12 @@ fun AiHubApp() {
                                         sending.remove(index)
                                         val current = subTasks[index]
                                         if (answer.startsWith("خطأ")) {
-                                            subTasks[index] = current.copy(status = "فشل الإرسال التلقائي — جرّب اليدوي")
+                                            subTasks[index] = current.copy(status = "فشل الإرسال التلقائي — جرّب اليدوي", doneAt = System.currentTimeMillis())
+                                            logEvent("فشل إرسال «${task.role}» — ${answer.take(80)}")
                                             Toast.makeText(context, answer.take(200), Toast.LENGTH_LONG).show()
                                         } else {
-                                            subTasks[index] = current.copy(result = answer, status = "اكتمل ✓ (تلقائي عبر API)")
+                                            subTasks[index] = current.copy(result = answer, status = "اكتمل ✓ (تلقائي عبر API)", doneAt = System.currentTimeMillis())
+                                            logEvent("اكتملت «${task.role}» من ${model.name}")
                                         }
                                     }
                                 },
@@ -951,6 +1073,9 @@ fun AiHubApp() {
                     Button(
                         onClick = {
                             sendingAll = true
+                            missionStartMs = System.currentTimeMillis()
+                            missionNowMs = missionStartMs
+                            logEvent("بدأ الإرسال التلقائي للكل ($keyedCount نماذج بمفاتيح)")
                             scope.launch {
                                 val jobs = subTasks.mapIndexedNotNull { index, task ->
                                     val provider = providerFor(task.modelIndex)
@@ -959,7 +1084,7 @@ fun AiHubApp() {
                                         val key = getKey(context, "key_$provider")
                                         if (key.isBlank()) null else {
                                             sending.add(index)
-                                            subTasks[index] = task.copy(status = "يُرسل تلقائياً عبر API…")
+                                            subTasks[index] = task.copy(status = "يُرسل تلقائياً عبر API…", startedAt = System.currentTimeMillis(), doneAt = 0L)
                                             async {
                                                 val modelName = getModel(context, provider, defaultModel(provider))
                                                 val answer = callApi(provider, key, modelName, task.prompt)
@@ -973,20 +1098,23 @@ fun AiHubApp() {
                                     sending.remove(index)
                                     val current = subTasks[index]
                                     if (answer.startsWith("خطأ")) {
-                                        subTasks[index] = current.copy(status = "فشل الإرسال التلقائي — جرّب اليدوي")
+                                        subTasks[index] = current.copy(status = "فشل الإرسال التلقائي — جرّب اليدوي", doneAt = System.currentTimeMillis())
+                                        logEvent("فشل إرسال «${current.role}»")
                                     } else {
-                                        subTasks[index] = current.copy(result = answer, status = "اكتمل ✓ (تلقائي عبر API)")
+                                        subTasks[index] = current.copy(result = answer, status = "اكتمل ✓ (تلقائي عبر API)", doneAt = System.currentTimeMillis())
+                                        logEvent("اكتملت «${current.role}»")
                                     }
                                 }
+                                logEvent("انتهى الإرسال للكل: ${subTasks.count { it.result.isNotBlank() }}/6 بنتائج")
                                 sendingAll = false
                                 val cIdxDone = conductorIndex
                                 val cProviderDone = if (cIdxDone != null) providerFor(cIdxDone) else null
                                 val cKeyDone = if (cProviderDone != null) getKey(context, "key_$cProviderDone") else ""
                                 if (cIdxDone != null && cProviderDone != null && cKeyDone.isNotBlank() && subTasks.any { it.result.isNotBlank() }) {
-                                    mergedReport = "⏳ القائد (${services[cIdxDone].name}) يدمج النتائج…"
-                                    val cModelDone = getModel(context, cProviderDone, defaultModel(cProviderDone))
-                                    val merged = callApi(cProviderDone, cKeyDone, cModelDone, conductorMergePrompt())
+                                    mergedReport = "⏳ القائد (${if (cIdxDone == 10) "🔧 مخصص" else services[cIdxDone].name}) يدمج النتائج…"
+                                    val merged = callConductorApi(context, cProviderDone, conductorMergePrompt())
                                     mergedReport = if (merged.startsWith("خطأ")) buildReport() else merged
+                                    logEvent("القائد دمج نتائج الكل في التقرير")
                                     Toast.makeText(context, "اكتمل الإرسال التلقائي — والقائد دمج النتائج في التقرير", Toast.LENGTH_LONG).show()
                                 } else {
                                     mergedReport = buildReport()
@@ -1025,28 +1153,28 @@ fun AiHubApp() {
                             onClick = {
                                 val p = cProviderMerge
                                 if (p == null || !cHasKeyMerge) {
-                                    Toast.makeText(context, "أضف مفتاح ${services[cIdxMerge].name} أولاً من شاشة المفاتيح", Toast.LENGTH_LONG).show()
+                                    Toast.makeText(context, "أضف مفتاح ${if (cIdxMerge == 10) "المخصص" else services[cIdxMerge].name} أولاً من شاشة المفاتيح", Toast.LENGTH_LONG).show()
                                 } else if (!anyResultMerge) {
                                     Toast.makeText(context, "لا نتائج بعد — أرسل المهام أولاً", Toast.LENGTH_SHORT).show()
                                 } else {
                                     conductorMerging = true
                                     scope.launch {
-                                        val key = getKey(context, "key_$p")
-                                        val modelName = getModel(context, p, defaultModel(p))
-                                        val answer = callApi(p, key, modelName, conductorMergePrompt())
+                                        val answer = callConductorApi(context, p, conductorMergePrompt())
                                         conductorMerging = false
                                         if (answer.startsWith("خطأ")) {
                                             mergedReport = buildReport()
+                                            logEvent("فشل الدمج الذكي — استُخدم الدمج العادي")
                                             Toast.makeText(context, "فشل الدمج الذكي — استُخدم الدمج العادي", Toast.LENGTH_LONG).show()
                                         } else {
                                             mergedReport = answer
+                                            logEvent("القائد دمج النتائج في تقرير واحد")
                                         }
                                     }
                                 }
                             },
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6A1B9A))
-                        ) { Text("🧠 دمج ذكي بالقائد (${services[cIdxMerge].name})", fontSize = 14.sp) }
+                        ) { Text("🧠 دمج ذكي بالقائد (${if (cIdxMerge == 10) "🔧 مخصص" else services[cIdxMerge].name})", fontSize = 14.sp) }
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                 }
@@ -1073,20 +1201,21 @@ fun AiHubApp() {
                         onClick = {
                             val p = cProviderRead
                             if (!cHasKeyRead) {
-                                Toast.makeText(context, "أضف مفتاح ${services[cIdxRead].name} أولاً من شاشة المفاتيح", Toast.LENGTH_LONG).show()
+                                Toast.makeText(context, "أضف مفتاح ${if (cIdxRead == 10) "المخصص" else services[cIdxRead].name} أولاً من شاشة المفاتيح", Toast.LENGTH_LONG).show()
                             } else if (readCount == 0) {
                                 Toast.makeText(context, "لا نصوص بعد — افتح تبويبات النماذج في المتصفح أولاً لتقرأها الإضافة", Toast.LENGTH_LONG).show()
                             } else {
                                 readingPages = true
+                                logEvent("القائد يقرأ $readCount صفحة من المتصفح…")
                                 scope.launch {
-                                    val key = getKey(context, "key_$p")
-                                    val modelName = getModel(context, p, defaultModel(p))
-                                    val answer = callApi(p, key, modelName, conductorPagesPrompt())
+                                    val answer = callConductorApi(context, p, conductorPagesPrompt())
                                     readingPages = false
                                     if (answer.startsWith("خطأ")) {
+                                        logEvent("تعذّر على القائد قراءة الصفحات")
                                         Toast.makeText(context, "تعذّر على القائد قراءة الصفحات — جرّب الدمج العادي", Toast.LENGTH_LONG).show()
                                     } else {
                                         mergedReport = answer
+                                        logEvent("القائد قرأ $readCount صفحة ودمجها في التقرير")
                                         Toast.makeText(context, "القائد قرأ $readCount صفحة ودمجها في التقرير", Toast.LENGTH_LONG).show()
                                     }
                                 }
@@ -1151,7 +1280,7 @@ fun AiHubApp() {
                     color = Color(0xFF555555)
                 )
                 Text(
-                    "Gemini له فئة مجانية (من Google AI Studio). OpenAI وAnthropic وxAI مدفوعة وتُحاسَب بالاستخدام — راقب رصيدك في مواقعها. وإن تغيّر اسم نموذج مع الوقت، عدّل حقل «اسم النموذج» هنا.",
+                    "📊 الحصص (تقريبية — راجع موقع كل شركة): Gemini له فئة مجانية من Google AI Studio. OpenAI وAnthropic وxAI مدفوعة وتُحاسَب بالاستخدام — راقب رصيدك في مواقعها. وإن تغيّر اسم نموذج مع الوقت، عدّل حقل «اسم النموذج» هنا.",
                     fontSize = 13.sp,
                     color = Color(0xFF555555)
                 )
@@ -1166,6 +1295,37 @@ fun AiHubApp() {
             item { KeyField("Google — Gemini", "aistudio.google.com/apikey", keyGemini, { keyGemini = it }, modelGemini, { modelGemini = it }) }
             item { KeyField("Anthropic — Claude", "console.anthropic.com", keyAnthropic, { keyAnthropic = it }, modelAnthropic, { modelAnthropic = it }) }
             item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFEDE7F6))
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("🔧 نقطة نهاية مخصصة (متوافقة مع OpenAI)", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Text("خادم يفهم صيغة OpenAI — مثل Groq (فئة مجانية: نحو 200 ألف توكن/يوم)، أو OpenRouter، أو خادم FreeLLMAPI إن شغّلته على جهاز آخر. تُستخدم كقائد إضافي من الرئيسية.", fontSize = 12.sp, color = Color(0xFF666666))
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = urlCustom, onValueChange = { urlCustom = it },
+                            label = { Text("رابط الخادم (مثال: https://api.groq.com)") },
+                            modifier = Modifier.fillMaxWidth(), singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = keyCustom, onValueChange = { keyCustom = it },
+                            label = { Text("المفتاح (API Key)") },
+                            modifier = Modifier.fillMaxWidth(), singleLine = true,
+                            visualTransformation = PasswordVisualTransformation()
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = modelCustom, onValueChange = { modelCustom = it },
+                            label = { Text("اسم النموذج (مثال: llama-3.3-70b-versatile)") },
+                            modifier = Modifier.fillMaxWidth(), singleLine = true
+                        )
+                    }
+                }
+            }
+            item {
                 Button(
                     onClick = {
                         prefs(context).edit()
@@ -1173,6 +1333,7 @@ fun AiHubApp() {
                             .putString("key_xai", keyXai.trim()).putString("model_xai", modelXai.trim())
                             .putString("key_gemini", keyGemini.trim()).putString("model_gemini", modelGemini.trim())
                             .putString("key_anthropic", keyAnthropic.trim()).putString("model_anthropic", modelAnthropic.trim())
+                            .putString("key_custom", keyCustom.trim()).putString("model_custom", modelCustom.trim()).putString("url_custom", urlCustom.trim())
                             .apply()
                         Toast.makeText(context, "تم حفظ المفاتيح في التطبيق فقط", Toast.LENGTH_SHORT).show()
                         screen = "home"
@@ -1182,7 +1343,7 @@ fun AiHubApp() {
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedButton(
                     onClick = {
-                        keyOpenAi = ""; keyXai = ""; keyGemini = ""; keyAnthropic = ""
+                        keyOpenAi = ""; keyXai = ""; keyGemini = ""; keyAnthropic = ""; keyCustom = ""; modelCustom = ""; urlCustom = ""
                         prefs(context).edit().clear().apply()
                         Toast.makeText(context, "تم مسح كل المفاتيح", Toast.LENGTH_SHORT).show()
                     },
