@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
+import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoView
@@ -407,8 +408,8 @@ fun AiHubApp() {
                     }
                 }
                 historyDelegate = object : GeckoSession.HistoryDelegate {
-                    override fun onHistoryStateChange(session: GeckoSession, canGoBack: Boolean, canGoForward: Boolean) {
-                        canGoBackMap[index] = canGoBack
+                    override fun onHistoryStateChange(session: GeckoSession, history: GeckoSession.HistoryDelegate.HistoryList) {
+                        canGoBackMap[index] = history.currentIndex > 0
                     }
                 }
                 open(geckoRuntime)
@@ -421,10 +422,12 @@ fun AiHubApp() {
     }
 
     // تثبيت الإضافة المدمجة مرة واحدة عند فتح التطبيق، واستقبال
-    // نصوص الصفحات منها عبر الرسائل الأصلية.
+    // نصوص الصفحات منها عبر الرسائل الأصلية. (في GeckoView 141:
+    // setMessageDelegate طريقة على WebExtension نفسها بعد التثبيت،
+    // وonMessage تعيد GeckoResult<Any>?.)
     LaunchedEffect(Unit) {
         val delegate = object : WebExtension.MessageDelegate {
-            override fun onMessage(nativeApp: String, message: Any, sender: WebExtension.MessageSender): Any? {
+            override fun onMessage(nativeApp: String, message: Any, sender: WebExtension.MessageSender): GeckoResult<Any>? {
                 val json = message as? JSONObject ?: return null
                 if (json.optString("type") != "pageText") return null
                 val idx = serviceIndexForUrl(json.optString("url")) ?: return null
@@ -433,9 +436,11 @@ fun AiHubApp() {
                 return null
             }
         }
-        geckoRuntime.webExtensionController.setMessageDelegate(delegate, "com.abd.aihubgecko")
         geckoRuntime.webExtensionController.installBuiltIn("resource://android/assets/webext/").accept(
-            { extensionReady = true },
+            { extension ->
+                extension.setMessageDelegate("com.abd.aihubgecko", delegate)
+                extensionReady = true
+            },
             { extensionReady = false }
         )
     }
