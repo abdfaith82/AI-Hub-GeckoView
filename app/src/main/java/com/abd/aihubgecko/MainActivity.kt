@@ -55,6 +55,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -75,6 +76,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 // (GeckoView — محرك موزيلا بدل WebView النظام)، وتسجّل الدخول أنت
 // بنفسك بحسابك في كل موقع — بلا أتمتة لتسجيل الدخول وبلا سرقة جلسات
 // وبلا نسخ شعارات.
+// v1.1 — إصلاحات القارئ: إعادة محاولة تثبيت الإضافة + تحديث تلقائي
+// مرة واحدة إن حمّلت الصفحة بلا قراءة، ومسح نص الصفحة القديم عند
+// تغيّر الرابط (محادثة جديدة) مع زرّي مسح، وإخفاء زر قراءة الصفحات
+// عندما يكون القائد بلا API رسمي (Meta AI / Antigravity).
 // v1.0-gecko — لماذا GeckoView؟ هو الطريق الوحيد المدعوم لإضافة داخل
 // التطبيق: إضافة مدمجة (assets/webext) تقرأ نص الصفحة الظاهرة وترسله
 // للتطبيق عبر الرسائل الأصلية — فيرى القائد نص صفحات الويب. قراءة
@@ -388,6 +393,12 @@ fun AiHubApp() {
     val canGoBackMap = remember { mutableStateMapOf<Int, Boolean>() }
     // نصوص الصفحات كما قرأتها الإضافة (آخر نسخة لكل نموذج)
     val pageTexts = remember { mutableStateMapOf<Int, String>() }
+    // v1.1 — آخر رابط لكل نموذج (لمسح النص القديم عند تغيّر المحادثة)،
+    // وعلامة «حُدّثت تلقائياً مرة» لكل تبويب، وحارس تثبيت الإضافة.
+    val pageUrls = remember { mutableStateMapOf<Int, String>() }
+    val autoReloaded = remember { mutableStateMapOf<Int, Boolean>() }
+    var installingExtension by remember { mutableStateOf(false) }
+    var extensionAttempts by remember { mutableStateOf(0) }
     var extensionReady by remember { mutableStateOf(false) }
     var geckoViewRef by remember { mutableStateOf<GeckoView?>(null) }
 
@@ -406,6 +417,18 @@ fun AiHubApp() {
                     override fun onPageStop(session: GeckoSession, success: Boolean) {
                         loadedTabs[index] = true
                     }
+                    // v1.1 — تغيّر الرابط يعني محادثة جديدة (مثلاً /c/<id>
+                    // في ChatGPT): امسح نص المحادثة السابقة فوراً حتى لا
+                    // يدمجه القائد ظناً أنه الإجابة الحالية، واسمح بتحديث
+                    // تلقائي جديد للرابط الجديد.
+                    override fun onLocationChange(session: GeckoSession, url: String?) {
+                        if (url == null) return
+                        if (pageUrls[index] != url) {
+                            pageUrls[index] = url
+                            pageTexts.remove(index)
+                            autoReloaded.remove(index)
+                        }
+                    }
                 }
                 historyDelegate = object : GeckoSession.HistoryDelegate {
                     override fun onHistoryStateChange(session: GeckoSession, history: GeckoSession.HistoryDelegate.HistoryList) {
@@ -421,12 +444,14 @@ fun AiHubApp() {
         getGeckoSession(index)
     }
 
-    // تثبيت الإضافة المدمجة مرة واحدة عند فتح التطبيق، واستقبال
-    // نصوص الصفحات منها عبر الرسائل الأصلية. (في GeckoView 141:
-    // setMessageDelegate طريقة على WebExtension نفسها بعد التثبيت،
-    // وonMessage تعيد GeckoResult<Any>?.)
-    LaunchedEffect(Unit) {
-        val delegate = object : WebExtension.MessageDelegate {
+    // v1.1 — تثبيت الإضافة مع إعادة محاولة: المندوب ثابت (remember)
+    // فيستطيع زر «إعادة التثبيت» في المتصفح استدعاء التثبيت نفسه،
+    // وحارس installingExtension يمنع تثبيتين متزامنين، وإن فشل
+    // التثبيت الأول يعيد التطبيق المحاولة بعد 5 ثوانٍ. (في GeckoView
+    // 141: setMessageDelegate طريقة على WebExtension نفسها بعد
+    // التثبيت، وonMessage تعيد GeckoResult<Any>?.)
+    val extensionDelegate = remember {
+        object : WebExtension.MessageDelegate {
             override fun onMessage(nativeApp: String, message: Any, sender: WebExtension.MessageSender): GeckoResult<Any>? {
                 val json = message as? JSONObject ?: return null
                 if (json.optString("type") != "pageText") return null
@@ -436,13 +461,27 @@ fun AiHubApp() {
                 return null
             }
         }
+    }
+    fun installExtension() {
+        if (installingExtension || extensionReady) return
+        installingExtension = true
+        extensionAttempts += 1
         geckoRuntime.webExtensionController.installBuiltIn("resource://android/assets/webext/").accept(
             { extension ->
-                extension?.setMessageDelegate(delegate, "com.abd.aihubgecko")
+                extension?.setMessageDelegate(extensionDelegate, "com.abd.aihubgecko")
                 extensionReady = true
+                installingExtension = false
             },
-            { extensionReady = false }
+            {
+                extensionReady = false
+                installingExtension = false
+            }
         )
+    }
+    LaunchedEffect(Unit) {
+        installExtension()
+        delay(5000)
+        if (!extensionReady) installExtension()
     }
     val scope = rememberCoroutineScope()
     val sending = remember { mutableStateListOf<Int>() }
@@ -1004,13 +1043,24 @@ fun AiHubApp() {
                 // فيدمجها في تقرير واحد (قراءة فقط — بلا كتابة في الصفحات).
                 val readCount = pageTexts.count { it.value.isNotBlank() }
                 val cIdxRead = conductorIndex
-                if (cIdxRead != null) {
-                    val cProviderRead = providerFor(cIdxRead)
-                    val cHasKeyRead = cProviderRead != null && getKey(context, "key_$cProviderRead").isNotBlank()
+                val cProviderRead = if (cIdxRead != null) providerFor(cIdxRead) else null
+                // v1.1 — القائد بلا API (Meta AI أو Antigravity) لا يظهر
+                // له زر قراءة الصفحات أصلاً، بل سطر يشرح أنه يحتاج
+                // قائداً من النماذج الأربعة ذات الـ API الرسمي.
+                if (cIdxRead != null && cProviderRead == null) {
+                    Text(
+                        "👁️ قراءة الصفحات تحتاج قائداً بـ API رسمي — القائد الحالي (${services[cIdxRead].name}) بلا API، فاختر قائداً من ChatGPT أو Grok أو Gemini أو Claude.",
+                        fontSize = 13.sp,
+                        color = Color(0xFF777777)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                if (cIdxRead != null && cProviderRead != null) {
+                    val cHasKeyRead = getKey(context, "key_$cProviderRead").isNotBlank()
                     Button(
                         onClick = {
                             val p = cProviderRead
-                            if (p == null || !cHasKeyRead) {
+                            if (!cHasKeyRead) {
                                 Toast.makeText(context, "أضف مفتاح ${services[cIdxRead].name} أولاً من شاشة المفاتيح", Toast.LENGTH_LONG).show()
                             } else if (readCount == 0) {
                                 Toast.makeText(context, "لا نصوص بعد — افتح تبويبات النماذج في المتصفح أولاً لتقرأها الإضافة", Toast.LENGTH_LONG).show()
@@ -1034,6 +1084,15 @@ fun AiHubApp() {
                         enabled = !readingPages,
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32))
                     ) { Text(if (readingPages) "⏳ القائد يقرأ الصفحات…" else "👁️ القائد يقرأ الصفحات ويدمجها ($readCount/6)", fontSize = 14.sp) }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                // v1.1 — مسح كل النصوص المقروءة دفعة واحدة (يمسح أيضاً
+                // علامات التحديث التلقائي، فيُعاد التحديث عند فتح التبويب).
+                if (readCount > 0) {
+                    OutlinedButton(
+                        onClick = { pageTexts.clear(); autoReloaded.clear() },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("🗑 مسح كل النصوص المقروءة ($readCount)", fontSize = 13.sp) }
                     Spacer(modifier = Modifier.height(8.dp))
                 }
                 Button(
@@ -1123,6 +1182,20 @@ fun AiHubApp() {
     } else {
         val service = services[selected]
         LaunchedEffect(selected) { ensureTab(selected) }
+        // v1.1 — إن حمّلت الصفحة ولم تقرأها الإضافة خلال 6 ثوانٍ،
+        // حدّثها مرة واحدة تلقائياً (فالتثبيت قد يكتمل بعد أول تحميل).
+        // مرة واحدة لكل رابط: يُصفَّر العداد عند تغيّر الرابط.
+        LaunchedEffect(selected, extensionReady, loadedTabs[selected]) {
+            if (!extensionReady) return@LaunchedEffect
+            if (loadedTabs[selected] != true) return@LaunchedEffect
+            if (pageTexts[selected]?.isNotBlank() == true) return@LaunchedEffect
+            if (autoReloaded[selected] == true) return@LaunchedEffect
+            delay(6000)
+            if (pageTexts[selected]?.isNotBlank() == true) return@LaunchedEffect
+            if (autoReloaded[selected] == true) return@LaunchedEffect
+            autoReloaded[selected] = true
+            sessionPool[selected]?.reload()
+        }
         Column(modifier = Modifier.fillMaxSize()) {
             ScrollableTabRow(selectedTabIndex = selected, edgePadding = 8.dp) {
                 services.forEachIndexed { index, item ->
@@ -1139,18 +1212,29 @@ fun AiHubApp() {
             ) {
                 Text(
                     "🦎 GeckoView — الجلسات الست تبقى محمّلة دائماً بلا إعادة تحميل. الإضافة المدمجة " +
-                        (if (extensionReady) "تعمل ✓ وتقرأ نص الصفحة الظاهرة للقائد." else "لم تُثبَّت بعد — أعد فتح التطبيق."),
+                        (if (extensionReady) "تعمل ✓ وتقرأ نص الصفحة الظاهرة للقائد." else "لم تُثبَّت بعد — اضغط زر إعادة التثبيت هنا."),
                     fontSize = 12.sp,
                     modifier = Modifier.weight(1f)
                 )
+                if (!extensionReady) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    OutlinedButton(onClick = { installExtension() }) { Text("↻ إعادة التثبيت", fontSize = 12.sp) }
+                }
             }
             val currentPageText = pageTexts[selected]
             if (currentPageText != null) {
-                Text(
-                    "👁️ الإضافة قرأت نص صفحة ${service.name} (${currentPageText.length} حرف) — جاهز للقائد.",
+                Row(
                     modifier = Modifier.fillMaxWidth().background(Color(0xFFE3F2FD)).padding(8.dp),
-                    fontSize = 12.sp
-                )
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "👁️ الإضافة قرأت نص صفحة ${service.name} (${currentPageText.length} حرف) — جاهز للقائد.",
+                        fontSize = 12.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    OutlinedButton(onClick = { pageTexts.remove(selected); autoReloaded.remove(selected) }) { Text("🗑 مسح", fontSize = 12.sp) }
+                }
             }
             if (service.id == "antigravity") {
                 Text(
