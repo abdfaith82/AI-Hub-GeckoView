@@ -417,10 +417,19 @@ fun AiHubApp() {
                     override fun onPageStop(session: GeckoSession, success: Boolean) {
                         loadedTabs[index] = true
                     }
-                    // v1.1 — تغيّر الرابط يعني محادثة جديدة (مثلاً /c/<id>
-                    // في ChatGPT): امسح نص المحادثة السابقة فوراً حتى لا
-                    // يدمجه القائد ظناً أنه الإجابة الحالية، واسمح بتحديث
-                    // تلقائي جديد للرابط الجديد.
+                }
+                historyDelegate = object : GeckoSession.HistoryDelegate {
+                    override fun onHistoryStateChange(session: GeckoSession, history: GeckoSession.HistoryDelegate.HistoryList) {
+                        canGoBackMap[index] = history.currentIndex > 0
+                    }
+                }
+                // v1.1 — تغيّر الرابط يعني محادثة جديدة (مثلاً /c/<id>
+                // في ChatGPT): امسح نص المحادثة السابقة فوراً حتى لا
+                // يدمجه القائد ظناً أنه الإجابة الحالية، واسمح بتحديث
+                // تلقائي جديد للرابط الجديد. ملاحظة: onLocationChange
+                // في GeckoView 141 ليست في ProgressDelegate بل في
+                // NavigationDelegate (البناء الأول لـ v1.1 فشل عليها).
+                navigationDelegate = object : GeckoSession.NavigationDelegate {
                     override fun onLocationChange(session: GeckoSession, url: String?) {
                         if (url == null) return
                         if (pageUrls[index] != url) {
@@ -428,11 +437,6 @@ fun AiHubApp() {
                             pageTexts.remove(index)
                             autoReloaded.remove(index)
                         }
-                    }
-                }
-                historyDelegate = object : GeckoSession.HistoryDelegate {
-                    override fun onHistoryStateChange(session: GeckoSession, history: GeckoSession.HistoryDelegate.HistoryList) {
-                        canGoBackMap[index] = history.currentIndex > 0
                     }
                 }
                 open(geckoRuntime)
