@@ -428,9 +428,17 @@ fun AiHubApp() {
                 // يدمجه القائد ظناً أنه الإجابة الحالية، واسمح بتحديث
                 // تلقائي جديد للرابط الجديد. ملاحظة: onLocationChange
                 // في GeckoView 141 ليست في ProgressDelegate بل في
-                // NavigationDelegate (البناء الأول لـ v1.1 فشل عليها).
+                // NavigationDelegate، وبتوقيع من 4 وسائط (البناءان الأولان
+                // لـ v1.1 فشلا عليها).
                 navigationDelegate = object : GeckoSession.NavigationDelegate {
-                    override fun onLocationChange(session: GeckoSession, url: String?) {
+                    // التوقيع الحقيقي في GeckoView 141 (من رسالة المترجم):
+                    // onLocationChange(session, url, perms, hasUserGesture)
+                    override fun onLocationChange(
+                        session: GeckoSession,
+                        url: String?,
+                        perms: List<GeckoSession.PermissionDelegate.ContentPermission>,
+                        hasUserGesture: Boolean
+                    ) {
                         if (url == null) return
                         if (pageUrls[index] != url) {
                             pageUrls[index] = url
