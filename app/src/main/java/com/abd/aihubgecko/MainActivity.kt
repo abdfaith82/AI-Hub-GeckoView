@@ -542,13 +542,6 @@ fun AiHubApp() {
         if (!extensionReady) installExtension()
     }
 
-    // v1.2 — غرفة التحكم: تحديث الزمن المنقضي كل ثانية أثناء الإرسال.
-    LaunchedEffect(sendingAll) {
-        while (sendingAll) {
-            missionNowMs = System.currentTimeMillis()
-            delay(1000)
-        }
-    }
     val scope = rememberCoroutineScope()
     val sending = remember { mutableStateListOf<Int>() }
     var sendingAll by remember { mutableStateOf(false) }
@@ -598,6 +591,13 @@ fun AiHubApp() {
         val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
         missionLog.add(0, "$time — $text")
         if (missionLog.size > 40) missionLog.removeAt(missionLog.size - 1)
+    }
+    // v1.2 — غرفة التحكم: تحديث الزمن المنقضي كل ثانية أثناء الإرسال.
+    LaunchedEffect(sendingAll) {
+        while (sendingAll) {
+            missionNowMs = System.currentTimeMillis()
+            delay(1000)
+        }
     }
 
     fun copyPrompt() {
