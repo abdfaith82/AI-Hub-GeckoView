@@ -11,7 +11,7 @@
         type: "pageText",
         url: location.href,
         title: document.title || "",
-        text: text.slice(0, 12000)
+        text: text.slice(-6000) // v1.4 — آخر 6,000 حرف (أحدث إجابة) بدل أول 12,000
       });
     } catch (e) { /* ignore */ }
   }

@@ -42,6 +42,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
@@ -79,6 +80,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 // (GeckoView — محرك موزيلا بدل WebView النظام)، وتسجّل الدخول أنت
 // بنفسك بحسابك في كل موقع — بلا أتمتة لتسجيل الدخول وبلا سرقة جلسات
 // وبلا نسخ شعارات.
+// v1.4 — إصلاحات القارئ الأربع الباقية: مطابقة دقيقة بالمضيف مع
+// تجاهل صفحات تسجيل الدخول، وحد 6,000 حرف من آخر الإجابة، وتشخيص
+// لكل نموذج خلف عداد (N/6)، ووضع توفير ذاكرة يغلق الجلسات غير المفتوحة.
 // v1.1 — إصلاحات القارئ: إعادة محاولة تثبيت الإضافة + تحديث تلقائي
 // مرة واحدة إن حمّلت الصفحة بلا قراءة، ومسح نص الصفحة القديم عند
 // تغيّر الرابط (محادثة جديدة) مع زرّي مسح، وإخفاء زر قراءة الصفحات
@@ -447,6 +451,10 @@ fun AiHubApp() {
     val canGoBackMap = remember { mutableStateMapOf<Int, Boolean>() }
     // نصوص الصفحات كما قرأتها الإضافة (آخر نسخة لكل نموذج)
     val pageTexts = remember { mutableStateMapOf<Int, String>() }
+    // v1.4 — وقت آخر قراءة لكل نموذج (لتشخيص القارئ)، ووضع توفير
+    // الذاكرة (محفوظ: يُغلق الجلسات غير المفتوحة).
+    val pageTextTimes = remember { mutableStateMapOf<Int, String>() }
+    var memorySaver by remember { mutableStateOf(prefs(context).getBoolean("memory_saver", false)) }
     // v1.1 — آخر رابط لكل نموذج (لمسح النص القديم عند تغيّر المحادثة)،
     // وعلامة «حُدّثت تلقائياً مرة» لكل تبويب، وحارس تثبيت الإضافة.
     val pageUrls = remember { mutableStateMapOf<Int, String>() }
@@ -456,12 +464,29 @@ fun AiHubApp() {
     var extensionReady by remember { mutableStateOf(false) }
     var geckoViewRef by remember { mutableStateOf<GeckoView?>(null) }
 
+    // v1.4 — مطابقة دقيقة بالمضيف بدل url.contains(host): مضيفو
+    // المحتوى لكل نموذج فقط. صفحات تسجيل الدخول (auth.openai.com،
+    // accounts.google.com، x.com، facebook.com…) لا تطابق أي نموذج،
+    // فلا يُسند نصها لنموذج ولا يُمسح بها نص قديم.
+    fun contentHosts(index: Int): List<String> = when (index) {
+        0 -> listOf("chatgpt.com", "chat.openai.com")
+        1 -> listOf("grok.com")
+        2 -> listOf("gemini.google.com")
+        3 -> listOf("claude.ai")
+        4 -> listOf("meta.ai")
+        5 -> listOf("antigravity.google")
+        else -> emptyList()
+    }
+    fun hostOf(url: String?): String? = try {
+        Uri.parse(url).host?.lowercase()
+    } catch (e: Exception) {
+        null
+    }
     fun serviceIndexForUrl(url: String?): Int? {
-        if (url == null) return null
-        return services.indexOfFirst { service ->
-            val host = Uri.parse(service.url).host ?: return@indexOfFirst false
-            url.contains(host)
-        }.takeIf { it >= 0 }
+        val host = hostOf(url) ?: return null
+        return services.indices.firstOrNull { idx ->
+            contentHosts(idx).any { h -> host == h || host.endsWith(".$h") }
+        }
     }
 
     fun getGeckoSession(index: Int): GeckoSession =
@@ -496,8 +521,14 @@ fun AiHubApp() {
                         if (url == null) return
                         if (pageUrls[index] != url) {
                             pageUrls[index] = url
-                            pageTexts.remove(index)
-                            autoReloaded.remove(index)
+                            // v1.4 — امسح النص القديم فقط إن كان الرابط الجديد
+                            // صفحة محتوى لنفس النموذج؛ رابط تسجيل دخول أو
+                            // خارجي لا يمسح النص المحفوظ.
+                            if (serviceIndexForUrl(url) == index) {
+                                pageTexts.remove(index)
+                                pageTextTimes.remove(index)
+                                autoReloaded.remove(index)
+                            }
                         }
                     }
                 }
@@ -508,6 +539,24 @@ fun AiHubApp() {
 
     fun ensureTab(index: Int) {
         getGeckoSession(index)
+    }
+
+    // v1.4 — توفير الذاكرة: إغلاق جلسات Gecko غير المفتوحة. تسجيل
+    // الدخول لا يضيع: الكوكيز محفوظة في ملف GeckoRuntime، فإعادة
+    // فتح التبويب تعيد تحميل الصفحة وأنت مسجّل دخولك.
+    fun releaseInactiveSessions(keepIndex: Int) {
+        val it = sessionPool.entries.iterator()
+        while (it.hasNext()) {
+            val entry = it.next()
+            if (entry.key != keepIndex) {
+                try {
+                    entry.value.close()
+                } catch (e: Exception) {
+                }
+                it.remove()
+                loadedTabs.remove(entry.key)
+            }
+        }
     }
 
     // v1.1 — تثبيت الإضافة مع إعادة محاولة: المندوب ثابت (remember)
@@ -523,7 +572,10 @@ fun AiHubApp() {
                 if (json.optString("type") != "pageText") return null
                 val idx = serviceIndexForUrl(json.optString("url")) ?: return null
                 val text = json.optString("text")
-                if (text.isNotBlank()) pageTexts[idx] = text
+                if (text.isNotBlank()) {
+                    pageTexts[idx] = text
+                    pageTextTimes[idx] = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+                }
                 return null
             }
         }
@@ -619,6 +671,7 @@ fun AiHubApp() {
     fun openService(index: Int, fromSplit: Boolean = false) {
         selected = index
         ensureTab(index)
+        if (memorySaver) releaseInactiveSessions(index)
         returnToSplit = fromSplit
         screen = "browser"
     }
@@ -656,9 +709,11 @@ fun AiHubApp() {
     fun conductorPagesPrompt(): String = buildString {
         append("You are the lead coordinator of a team of AI models. Main task: $mainTask\nTask type: $taskType\n\n")
         append("Below is the live text of the web pages currently open in the app's browser, as read by the app's built-in page reader (read-only). Each section is what that model wrote on its own page. Write ONE final report in Arabic: merge them into a single coherent report, remove duplication, resolve contradictions (note any disagreement briefly), keep the strongest points, use clear headings. Do not invent new facts. Ignore pages with no text yet.\n\n")
+        // v1.4 — حد 6,000 حرف لكل صفحة من آخر النص (أحدث إجابة)،
+        // فالمجموع الأقصى للقائد 36,000 حرف بدل 72,000.
         pageTexts.forEach { (idx, text) ->
             append("### ${services[idx].name} — page text\n")
-            append(text + "\n\n")
+            append(text.takeLast(6000) + "\n\n")
         }
     }
 
@@ -841,6 +896,38 @@ fun AiHubApp() {
                     fontSize = 12.sp,
                     color = Color(0xFF777777)
                 )
+            }
+            // v1.4 — وضع توفير الذاكرة: يُغلق جلسات النماذج غير
+            // المفتوحة لتخفيف الذاكرة على الهواتف الضعيفة.
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E9))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("💾 توفير الذاكرة", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                "يُغلق جلسات النماذج غير المفتوحة لتخفيف الذاكرة — تسجيل دخولك يبقى محفوظاً، وإعادة فتح التبويب تعيد تحميل صفحته فقط.",
+                                fontSize = 12.sp,
+                                color = Color(0xFF555555)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Switch(
+                            checked = memorySaver,
+                            onCheckedChange = {
+                                memorySaver = it
+                                prefs(context).edit().putBoolean("memory_saver", it).apply()
+                                if (it) releaseInactiveSessions(selected)
+                            }
+                        )
+                    }
+                }
             }
             items(services) { service ->
                 val index = services.indexOf(service)
@@ -1240,11 +1327,35 @@ fun AiHubApp() {
                 // علامات التحديث التلقائي، فيُعاد التحديث عند فتح التبويب).
                 if (readCount > 0) {
                     OutlinedButton(
-                        onClick = { pageTexts.clear(); autoReloaded.clear() },
+                        onClick = { pageTexts.clear(); pageTextTimes.clear(); autoReloaded.clear() },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("🗑 مسح كل النصوص المقروءة ($readCount)", fontSize = 13.sp) }
                     Spacer(modifier = Modifier.height(8.dp))
                 }
+                // v1.4 — تشخيص القارئ لكل نموذج: ما خلف عداد (N/6) —
+                // مقروءة وكم حرفاً ومتى، أم مفتوحة بلا قراءة، أم لم تُفتح.
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFE3F2FD))
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("🔍 حالة قراءة الصفحات:", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        services.forEachIndexed { idx, model ->
+                            val text = pageTexts[idx]
+                            val status = when {
+                                !text.isNullOrBlank() -> "✓ مقروءة — ${text.length} حرف (آخر قراءة ${pageTextTimes[idx] ?: ""})"
+                                loadedTabs[idx] == true -> "◌ مفتوحة ولم تقرأها الإضافة بعد — حدّث الصفحة أو أعد تثبيت الإضافة"
+                                else -> "○ لم تُفتح بعد في المتصفح"
+                            }
+                            Text("${model.name}: $status", fontSize = 13.sp)
+                        }
+                        val totalChars = pageTexts.values.sumOf { it.length }
+                        Text("المجموع المرسل للقائد: $totalChars حرف (حد 6,000 لكل صفحة)", fontSize = 12.sp, color = Color(0xFF555555))
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
                 Button(
                     onClick = {
                         mergedReport = buildReport()
@@ -1388,7 +1499,7 @@ fun AiHubApp() {
                 services.forEachIndexed { index, item ->
                     Tab(
                         selected = selected == index,
-                        onClick = { ensureTab(index); selected = index },
+                        onClick = { ensureTab(index); selected = index; if (memorySaver) releaseInactiveSessions(index) },
                         text = { Text(item.name + if (loadedTabs[index] == true) " ✓" else "", fontSize = 13.sp) }
                     )
                 }
@@ -1398,7 +1509,7 @@ fun AiHubApp() {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "🦎 GeckoView — الجلسات الست تبقى محمّلة دائماً بلا إعادة تحميل. الإضافة المدمجة " +
+                    "🦎 GeckoView — " + (if (memorySaver) "وضع توفير الذاكرة مفعّل: الجلسات غير المفتوحة تُغلق وتُعاد تحميل صفحتها عند فتحها. " else "الجلسات الست تبقى محمّلة دائماً بلا إعادة تحميل. ") + "الإضافة المدمجة " +
                         (if (extensionReady) "تعمل ✓ وتقرأ نص الصفحة الظاهرة للقائد." else "لم تُثبَّت بعد — اضغط زر إعادة التثبيت هنا."),
                     fontSize = 12.sp,
                     modifier = Modifier.weight(1f)
@@ -1420,7 +1531,7 @@ fun AiHubApp() {
                         modifier = Modifier.weight(1f)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    OutlinedButton(onClick = { pageTexts.remove(selected); autoReloaded.remove(selected) }) { Text("🗑 مسح", fontSize = 12.sp) }
+                    OutlinedButton(onClick = { pageTexts.remove(selected); pageTextTimes.remove(selected); autoReloaded.remove(selected) }) { Text("🗑 مسح", fontSize = 12.sp) }
                 }
             }
             if (service.id == "antigravity") {
