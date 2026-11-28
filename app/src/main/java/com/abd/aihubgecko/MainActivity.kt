@@ -271,10 +271,15 @@ fun prefs(context: Context) = context.getSharedPreferences("aihub_keys", Context
 fun getKey(context: Context, name: String): String = prefs(context).getString(name, "").orEmpty()
 // v1.3 — ترحيل أسماء نماذج تقاعدت عند أصحابها: الاسم المحفوظ
 // القديم يُستبدل تلقائياً بالبديل الحالي، فلا يعود 404.
+// v1.4.1 — تقاعد claude-sonnet-4-5 الاثنين 2026-11-30: الترحيل
+// والافتراضي صارا claude-sonnet-5-5. ملاحظة أمان: Sonnet 5.5
+// يرفض temperature/top_p/top_k، والتطبيق لا يرسل أياً منها في
+// مكالمات Anthropic (فقط model وmax_tokens وmessages).
 fun migratedModel(saved: String): String = when (saved.trim()) {
     "grok-4" -> "grok-4.3"
     "gemini-2.5-flash" -> "gemini-3.5-flash-lite"
     "gemini-2.5-pro" -> "gemini-3.8-flash"
+    "claude-sonnet-4-5-20250929", "claude-sonnet-4-5" -> "claude-sonnet-5-5"
     else -> saved
 }
 fun getModel(context: Context, provider: String, default: String): String {
@@ -294,7 +299,7 @@ fun defaultModel(provider: String): String = when (provider) {
     "custom" -> "gpt-4o-mini"
     "xai" -> "grok-4.3"
     "gemini" -> "gemini-3.5-flash-lite"
-    "anthropic" -> "claude-sonnet-4-5-20250929"
+    "anthropic" -> "claude-sonnet-5-5"
     else -> ""
 }
 

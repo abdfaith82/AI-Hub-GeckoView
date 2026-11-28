@@ -11,6 +11,10 @@ WebView النظام لا يدعم الإضافات أصلاً. GeckoView هو �
 للتطبيق عبر الرسائل الأصلية (`nativeMessaging`) — فيرى القائد نص
 صفحات الويب. قراءة فقط: الإضافة لا تكتب شيئاً في الصفحات.
 
+## ما فيه (v1.4.1)
+
+- إصلاح عاجل قبل تقاعد `claude-sonnet-4-5` الاثنين 2026-11-30: الافتراضي صار `claude-sonnet-5-5`، والأسماء المحفوظة `claude-sonnet-4-5-20250929` و`claude-sonnet-4-5` تُرحَّل تلقائياً إليه. مكالمات Anthropic ترسل فقط `model` و`max_tokens` و`messages`، فلا مشكلة مع رفض Sonnet 5.5 لـ `temperature`/`top_p`/`top_k`.
+
 ## ما فيه (v1.4)
 
 - مطابقة دقيقة بالمضيف: نص صفحة يُسند لنموذجه بمضيفه فقط (chatgpt.com، grok.com، gemini.google.com، claude.ai، meta.ai، antigravity.google) — صفحات تسجيل الدخول (auth.openai.com، accounts.google.com…) تُتجاهل ولا يُمسح بها نص قديم.
